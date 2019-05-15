@@ -1,5 +1,7 @@
 use rand::{rngs::ThreadRng, thread_rng, Rng};
 use std::cmp::PartialOrd;
+use std::fmt::Debug;
+use std::ptr::{drop_in_place, null_mut};
 
 struct SkipNode<K, V> {
     key: K,
@@ -8,25 +10,25 @@ struct SkipNode<K, V> {
 }
 
 impl<K, V> SkipNode<K, V> {
-    fn new() -> Self {
+    fn new(level: usize) -> Self {
         Self {
             key: unsafe { std::mem::uninitialized() },
             val: unsafe { std::mem::uninitialized() },
-            next: vec![],
+            next: vec![null_mut(); level],
         }
     }
-    fn new_with_kv(key: K, val: V) -> Self {
+    fn new_with_kv(key: K, val: V, level: usize) -> Self {
         Self {
             key,
             val,
-            next: vec![],
+            next: vec![null_mut(); level],
         }
     }
 }
 
-struct SkipList<K, V> {
+pub struct SkipList<K, V> {
     max_level: usize,
-    head: SkipNode<K, V>,
+    head: *mut SkipNode<K, V>,
     rng: ThreadRng,
 }
 
@@ -34,21 +36,14 @@ impl<K, V> SkipList<K, V>
 where
     K: PartialOrd,
 {
-    fn new(max_level: usize) -> Self {
+    pub fn new(max_level: usize) -> Self {
         assert!(max_level > 0);
-        let mut head = SkipNode::new();
-        let ptr: *mut SkipNode<K, V> = unsafe { std::mem::transmute(&head) };
-        head.next.extend(vec![ptr; max_level]);
+        let head_box = Box::new(SkipNode::<K, V>::new(max_level));
         Self {
             max_level,
-            head,
+            head: Box::into_raw(head_box),
             rng: thread_rng(),
         }
-    }
-
-    #[inline(always)]
-    unsafe fn tail(&self) -> *mut SkipNode<K, V> {
-        std::mem::transmute(&self.head)
     }
 
     fn random_level(&mut self) -> usize {
@@ -59,39 +54,107 @@ where
         level + 1 // [1, max_level]
     }
 
-    fn insert(&mut self, key: K, val: V) {
-        let mut prev: Vec<*mut SkipNode<K, V>> = vec![];
-        let mut curr: &SkipNode<K, V> = &self.head;
+    fn get_prevs(&self, key: &K) -> Vec<*mut SkipNode<K, V>> {
+        let mut prevs = vec![];
+        let mut prev = self.head;
         for l in (0..self.max_level).rev() {
             unsafe {
-                while curr.next[l] != self.tail() && (*curr.next[l]).key < key {
-                    curr = &*curr.next[l];
+                let mut curr = (*prev).next[l];
+                while !curr.is_null() && &(*curr).key < key {
+                    prev = curr;
+                    curr = (*curr).next[l];
                 }
-                prev.push(std::mem::transmute(curr));
+                prevs.push(prev);
             }
         }
-        prev.reverse();
-        let mut node = SkipNode::new_with_kv(key, val);
-        for l in 0..self.random_level() {
+        prevs.reverse();
+        prevs
+    }
+
+    pub fn insert(&mut self, key: K, val: V) {
+        let mut prevs = self.get_prevs(&key);
+        unsafe {
+            let node = (*prevs[0]).next[0];
+            if !node.is_null() && (*node).key == key {
+                (*node).val = val;
+                return;
+            }
+            let node = Box::into_raw(Box::new(SkipNode::new_with_kv(
+                key,
+                val,
+                self.random_level(),
+            )));
+            for l in 0..(*node).next.len() {
+                (*node).next[l] = (*prevs[l]).next[l];
+                (*prevs[l]).next[l] = node;
+            }
+        }
+    }
+
+    pub fn delete(&mut self, key: &K) {
+        let mut prevs = self.get_prevs(&key);
+        unsafe {
+            let node = (*prevs[0]).next[0];
+            if node.is_null() || &(*node).key != key {
+                return;
+            }
+            for l in 0..(*node).next.len() {
+                (*prevs[l]).next[l] = (*node).next[l];
+            }
+        }
+    }
+
+    pub fn get(&mut self, key: &K) -> Option<&V> {
+        let mut prev = self.head;
+        for l in (0..self.max_level).rev() {
             unsafe {
-                node.next.push((*prev[l]).next[l]);
-                (*prev[l]).next[l] = std::mem::transmute(&node);
+                let mut curr = (*prev).next[l];
+                while !curr.is_null() && &(*curr).key < key {
+                    prev = curr;
+                    curr = (*curr).next[l];
+                }
+                if !curr.is_null() && &(*curr).key == key {
+                    return Some(&(*curr).val);
+                }
             }
         }
-        std::mem::forget(node);
+        None
     }
 }
 
 impl<K, V> Drop for SkipList<K, V> {
     fn drop(&mut self) {
         unsafe {
-            let curr_ptr = std::mem::transmute(&mut self.head);
-            let mut ptr = self.head.next[0];
-            while ptr != curr_ptr {
+            let mut ptr = self.head;
+            while !ptr.is_null() {
                 let next_ptr = (*ptr).next[0];
-                std::ptr::drop_in_place(ptr);
+                drop_in_place(ptr);
                 ptr = next_ptr;
             }
         }
+    }
+}
+
+impl<K, V> Debug for SkipList<K, V>
+where
+    K: Debug + PartialOrd,
+    V: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        for l in (0..self.max_level).rev() {
+            unsafe {
+                let mut curr = (*self.head).next[l];
+                if curr.is_null() {
+                    continue;
+                }
+                write!(f, "{}:", l)?;
+                while !curr.is_null() {
+                    write!(f, " {:?}", (*curr).key)?;
+                    curr = (*curr).next[l];
+                }
+                write!(f, "\n")?;
+            }
+        }
+        Ok(())
     }
 }

@@ -158,3 +158,25 @@ where
         Ok(())
     }
 }
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_skiplist() {
+        let mut rng = rand::thread_rng();
+        let mut l = SkipList::<u32, u32>::new(4);
+        l.insert(50, 50);
+        for _ in 0..20 {
+            let k = rng.gen::<u32>() % 100;
+            l.insert(k, k);
+            assert_eq!(l.get(&k), Some(&k));
+        }
+        println!("{:?}", l);
+        assert_eq!(l.get(&50), Some(&50));
+        l.delete(&50);
+        assert_eq!(l.get(&50), None);
+    }
+}

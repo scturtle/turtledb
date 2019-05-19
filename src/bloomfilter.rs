@@ -4,17 +4,14 @@ const BITS_PER_KEY: u8 = 10;
 const K: u8 = 6; // BITS_PER_KEY * ln(2)
 
 pub struct BloomFilter {
-    k: u8,
     array: Vec<u8>,
 }
 
 impl BloomFilter {
     pub fn new(n_keys: usize) -> Self {
-        let k = K;
         let bits = 64.max(BITS_PER_KEY as usize * n_keys);
         let bytes = (bits + 7) / 8;
         Self {
-            k,
             array: vec![0u8; bytes],
         }
     }
@@ -22,7 +19,7 @@ impl BloomFilter {
         let bits = self.array.len() * 8;
         let mut h = hash(key);
         let delta = h.rotate_right(17);
-        for _ in 0..self.k {
+        for _ in 0..K {
             let bitpos = (h as usize) % bits;
             self.array[bitpos / 8] |= 1 << (bitpos % 8);
             h = h.wrapping_add(delta);
@@ -32,7 +29,7 @@ impl BloomFilter {
         let bits = self.array.len() * 8;
         let mut h = hash(key);
         let delta = h.rotate_right(17);
-        for _ in 0..self.k {
+        for _ in 0..K {
             let bitpos = (h as usize) % bits;
             if self.array[bitpos / 8] & (1 << (bitpos % 8)) == 0 {
                 return false;
@@ -40,6 +37,9 @@ impl BloomFilter {
             h = h.wrapping_add(delta);
         }
         true
+    }
+    pub fn into_vec(self) -> Vec<u8> {
+        self.array.into()
     }
 }
 

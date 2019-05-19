@@ -1,8 +1,6 @@
 use integer_encoding::FixedInt;
 use std::borrow::Borrow;
 
-const BLOCK_SIZE: usize = 4 * 1024;
-
 pub fn hash<T: Borrow<[u8]>>(data: T) -> u32 {
     let data = data.borrow();
     const SEED: u32 = 0xbc9f1d34;

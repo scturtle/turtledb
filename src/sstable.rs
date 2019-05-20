@@ -1,5 +1,6 @@
 use crate::bloomfilter::BloomFilter;
-use integer_encoding::{FixedIntWriter, VarIntWriter};
+use crc::crc32::{Digest, Hasher32, CASTAGNOLI};
+use integer_encoding::{FixedInt, FixedIntWriter, VarIntWriter};
 
 pub const BLOCK_SIZE: usize = 4 * 1024;
 pub const BLOCK_RESTART_INTERVAL: usize = 16;
@@ -64,10 +65,8 @@ impl BlockBuilder {
         self.buffer.push(1u8); // 1 for snappy
 
         // crc
-        use crc::crc32::{Digest, Hasher32, CASTAGNOLI};
         let mut digest = Digest::new(CASTAGNOLI);
         digest.write(&self.buffer);
-        // skip mask step
         self.buffer.write_fixedint(digest.sum32()).unwrap();
 
         // reset
@@ -80,6 +79,46 @@ impl BlockBuilder {
     }
     pub fn size(&self) -> usize {
         self.buffer.len() + 4 * self.restarts.len()
+    }
+}
+
+struct Block {
+    data: Vec<u8>,
+    restarts: Vec<usize>,
+}
+
+impl Block {
+    pub fn load(raw: &[u8]) -> Option<Self> {
+        if raw.len() < 4 {
+            return None;
+        }
+        let raw_without_crc = &raw[..raw.len() - 4];
+        let crc = u32::decode_fixed(&raw[raw.len() - 4..]);
+        // check crc
+        let mut digest = Digest::new(CASTAGNOLI);
+        digest.write(raw_without_crc);
+        if digest.sum32() != crc {
+            return None;
+        }
+        // decompress
+        let mut decoder = snap::Decoder::new();
+        let mut data = decoder.decompress_vec(raw_without_crc).ok()?;
+        if data.len() < 4 {
+            return None;
+        }
+        // extract restarts
+        let restart_cnt = u32::decode_fixed(&data[data.len() - 4..]) as usize;
+        if data.len() < 4 + 4 * restart_cnt {
+            return None;
+        }
+        let offset = data.len() - 4 - 4 * restart_cnt;
+        let mut restarts = Vec::with_capacity(restart_cnt);
+        for i in 0..restart_cnt {
+            let buf = &data[offset + 4 * i..offset + 4 * (i + 1)];
+            restarts.push(u32::decode_fixed(buf) as usize);
+        }
+        data.resize(offset, 0);
+        Some(Self { data, restarts })
     }
 }
 

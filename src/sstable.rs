@@ -7,15 +7,17 @@ pub const BLOCK_RESTART_INTERVAL: usize = 16;
 struct BlockBuilder {
     buffer: Vec<u8>,
     count: usize,
+    restart_interval: usize,
     restarts: Vec<usize>,
     last_key: Vec<u8>,
 }
 
 impl BlockBuilder {
-    pub fn new() -> Self {
+    pub fn new(restart_interval: usize) -> Self {
         Self {
             buffer: vec![],
             count: 0,
+            restart_interval,
             restarts: vec![],
             last_key: vec![],
         }
@@ -24,7 +26,7 @@ impl BlockBuilder {
         debug_assert!(self.last_key.is_empty() || self.last_key.as_slice() <= key);
         // count the length of shared prefix between last_key and key
         let mut shared_cnt = 0;
-        if self.count % BLOCK_RESTART_INTERVAL == 0 {
+        if self.count % self.restart_interval == 0 {
             self.restarts.push(self.buffer.len());
             self.last_key.clear();
         } else {
@@ -81,22 +83,66 @@ impl BlockBuilder {
     }
 }
 
+struct FiltersBuilder {
+    filters: Vec<BloomFilter>,
+}
+
+impl FiltersBuilder {
+    pub fn new() -> Self {
+        Self { filters: vec![] }
+    }
+    pub fn add_filter(&mut self, keys: &Vec<Vec<u8>>) {
+        let mut filter = BloomFilter::new(keys.len());
+        for key in keys {
+            filter.add(key);
+        }
+        self.filters.push(filter);
+    }
+    pub fn done(&mut self) -> Vec<u8> {
+        let mut buffer = vec![];
+        let mut filters = vec![];
+        std::mem::swap(&mut filters, &mut self.filters);
+        // filters
+        let mut filter_offsets = vec![];
+        for f in filters {
+            filter_offsets.push(buffer.len());
+            let bytes = f.into_vec();
+            buffer.write_fixedint(bytes.len() as u32).unwrap();
+            buffer.extend(bytes);
+        }
+        // offsets
+        let offset_of_offsets = buffer.len();
+        for o in filter_offsets {
+            buffer.write_fixedint(o as u32).unwrap();
+        }
+        buffer.write_fixedint(offset_of_offsets as u32).unwrap();
+        // compress
+        let mut encoder = snap::Encoder::new();
+        buffer = encoder.compress_vec(&buffer).expect("snappy compression");
+        // crc
+        let mut digest = Digest::new(CASTAGNOLI);
+        digest.write(&buffer);
+        buffer.write_fixedint(digest.sum32()).unwrap();
+        buffer
+    }
+}
+
 struct TableBuilder {
     buffer: Vec<u8>,
     data_builder: BlockBuilder,
     index_builder: BlockBuilder,
+    filters_builder: FiltersBuilder,
     curr_keys: Vec<Vec<u8>>,
-    filters: Vec<BloomFilter>,
 }
 
 impl TableBuilder {
     pub fn new() -> Self {
         Self {
             buffer: vec![],
-            data_builder: BlockBuilder::new(),
-            index_builder: BlockBuilder::new(),
+            data_builder: BlockBuilder::new(BLOCK_RESTART_INTERVAL),
+            index_builder: BlockBuilder::new(2),
+            filters_builder: FiltersBuilder::new(),
             curr_keys: vec![],
-            filters: vec![],
         }
     }
     pub fn add(&mut self, key: &[u8], val: &[u8]) {
@@ -109,11 +155,7 @@ impl TableBuilder {
     pub fn finish_curr_data_block(&mut self) {
         debug_assert!(self.curr_keys.len() > 0);
         // build filter
-        let mut filter = BloomFilter::new(self.curr_keys.len());
-        for key in &self.curr_keys {
-            filter.add(key);
-        }
-        self.filters.push(filter);
+        self.filters_builder.add_filter(&self.curr_keys);
         // write to buffer
         let offset = self.buffer.len();
         let bytes = self.data_builder.done();
@@ -123,6 +165,7 @@ impl TableBuilder {
         let mut oh = vec![];
         oh.write_varint(offset).unwrap();
         oh.write_varint(length).unwrap();
+        dbg!(&self.curr_keys);
         self.index_builder.add(self.curr_keys.last().unwrap(), &oh);
         // reset
         self.curr_keys.clear();
@@ -131,19 +174,10 @@ impl TableBuilder {
         // finish last block
         self.finish_curr_data_block();
         // write fitler block
-        let mut filters = vec![];
-        std::mem::swap(&mut filters, &mut self.filters);
-        let mut filter_offsets = vec![];
-        for f in filters {
-            filter_offsets.push(self.buffer.len());
-            let bytes = f.into_vec();
-            self.buffer.write_fixedint(bytes.len() as u32).unwrap();
-            self.buffer.extend(bytes);
-        }
-        let offset_of_filter_offsets = self.buffer.len();
-        for o in filter_offsets {
-            self.buffer.write_fixedint(o as u32).unwrap();
-        }
+        let offset_of_filters = self.buffer.len();
+        let bytes = self.filters_builder.done();
+        let length_of_filters = bytes.len();
+        self.buffer.extend(bytes);
         // write index block
         let offset_of_index = self.buffer.len();
         let bytes = self.index_builder.done();
@@ -151,16 +185,17 @@ impl TableBuilder {
         self.buffer.extend(bytes);
         // write footer
         self.buffer
-            .write_fixedint(offset_of_filter_offsets as u32)
+            .write_fixedint(offset_of_filters as u32)
+            .unwrap();
+        self.buffer
+            .write_fixedint(length_of_filters as u32)
             .unwrap();
         self.buffer.write_fixedint(offset_of_index as u32).unwrap();
         self.buffer.write_fixedint(length_of_index as u32).unwrap();
-        self.buffer.extend(" SCT".as_bytes().to_vec());
-
+        self.buffer.extend("SCTURTLE".as_bytes().to_vec());
         // reset
         let mut result = vec![];
         std::mem::swap(&mut result, &mut self.buffer);
-        self.filters.clear();
         result
     }
 }
